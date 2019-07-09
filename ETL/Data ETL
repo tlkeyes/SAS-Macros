@@ -1,0 +1,401 @@
+/*=============================================================================
+ |   	PROGRAM:  DataETL
+ |       AUTHOR:  lkeyes
+ |
+ |  DESCRIPTION:  Program aims to refactor existing code that imports all
+ |				  TCPS data on a monthly basis. Furthermore, to unburdon coder
+ |				  from having to create a seporate program for each measure. 
+ |
+ |     LANGUAGE:  SAS
+ |                
+ | DEFICIENCIES:  While code is very efficient, there is no way to take care
+ |				  of every problem that one could expect while importing data.
+ |			      For that reason, it is assumed that some amount of post-
+ |				  processing might be involved after the inital import of data.
+ *===========================================================================*/
+
+*******************************************************************************************************
+*	SET CURRENT LIBRARIES TO PULL DATA FROM
+*
+******************************************************************************************************;
+
+libname rd_data oledb 
+	Provider=sqloledb 
+	datasource='xxxxxxx'
+	Properties=("inital catalog"=xxxxxxx)
+	Prompt=yes;
+
+libname crm_data oledb 
+	Provider=sqloledb 
+	datasource='xxxxxxx'
+	Properties=("inital catalog"=xxxxxxx)
+	Prompt=yes;
+
+libname tcps_sql oledb 
+	Provider=sqloledb 
+	datasource='xxxxxxx'
+	Properties=("inital catalog"=xxxxxxx)
+	Prompt=yes;
+
+libname sql_data 'X:\xxxxxxx\xxxxxxx\Test Data';
+libname sir_data 'X:\xxxxxxx\xxxxxxx\Test Data\SIR';
+libname sur_data 'X:\xxxxxxx\xxxxxxx\Test Data\SUR';
+libname staging 'X:\xxxxxxx\xxxxxxx\Test Data\Staging';
+
+*******************************************************************************************************
+*	CREATE TEST LIBRARIES TO SET DATA INTO: THIS IS TO CHECK THE DATA AFTER IMPORT, BEFORE PUTTING INTO
+*	SQL DATABASE
+*
+******************************************************************************************************;
+libname Sir 'X:\xxxxxxx\xxxxxxx\xxxxxxx\ETL Test\Sir';
+libname Sur 'X:\xxxxxxx\xxxxxxx\xxxxxxx\ETL Test\Sur';
+libname Crude 'X:\xxxxxxx\xxxxxxx\xxxxxxx\ETL Test\Crude';
+libname RD 'X:\xxxxxxx\xxxxxxx\xxxxxxx\ETL Test\RD';
+libname Claims 'X:\xxxxxxx\xxxxxxx\xxxxxxx\ETL Test\Claims';
+
+*******************************************************************************************************
+*	CODE BEGINS: 
+*
+******************************************************************************************************;
+
+*****************************************
+*	CREATE HOSPITAL LOOKUP TABLE
+****************************************;
+data Hospital_Lookup;
+format Name $100. New_JarID $10. New_Nhsn_ID $5. JarID_n 10. Nhsn_n 5.;
+	keep name new_jarid new_nhsn_id jarid_n NHSN_n;
+set crm_data.filteredaccount;
+	if statuscode=1;
+	if substr(new_jarid,1,1) in ('0','1','2','3','4','5','6','7','8','9');
+	jarid_n=new_jarid*1;
+	NHSN_n=new_nhsn_id*1;
+run;
+
+proc sort data=hospital_lookup; 
+	by Name;
+run;
+
+*****************************************
+*	CREATE FILE PARAMETER TABLE
+****************************************;
+Proc sql noprint;
+create table measureParameters
+	(dataSource char(20),
+	 MeasureName char(20),
+	 MeasureType char(20),
+	 ProcessOutcome char(20),
+	 TableName char(50),
+	 Date char(10),
+	 NHSN char(10),
+	 JarID char(10), 
+	 LocCDC char(20),
+	 UnitType char(20),
+	 UnitName char(20),
+     Numerator char(20), 
+	 Denominator char(20),
+	 Conditional char(500));
+insert into measureParameters
+	values('RD', 'Measure_Name','Measure_Type','Process_Outcome','rd_data.Surveys',null,null,'JarID',null,'Unit_Type','Unit_Name','Numerator','Denominator','AND isdeleted = 0')
+	values('Claims', 'Measure_Name', 'Measure_Type', 'Process_Outcome', 'tcps_sql.raw_monthly_current', null, null, 'JarID', null, 'Unit_Type', 'Unit_Name', 'Numerator', 'Denominator', 'AND measure_name in ("PSI", "PDI", "claimsADE", "Readmissions", "Sepsis")')
+	values('Claims', 'Measure_Name', 'Measure_Type', 'Process_Outcome', 'sql_data.allhiin', null, null, 'JarID', null, 'Unit_Type', 'Unit_Name', 'Numerator', 'Denominator', 'AND measure_name is not null')
+	values('Crude', 'Cauti',null,'Outcome','Sql_data.Sql_cauti','summaryYM','orgID',null,'LocCDC',null,'Location','CAUcount','numucathdays','AND numucathdays ne . ')
+	values('Crude', 'Cauti',null,'Process','Sql_data.Sql_cauti','summaryYM','orgID',null,'LocCDC',null,'Location','numucathdays','numpatdays','AND numucathdays ne . ')
+	values('Sir', 'Cauti',null,'Outcome','Sir_data.Sir_cau_monthly_gt15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numPred','numucathdays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sir', 'Cauti',null,'Outcome','Sir_data.Sir_cau_monthly_le15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numPred','numucathdays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sur', 'Cauti',null,'Outcome','Sur_data.Sur_cau_monthly_gt15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numuCathDays','numPredDDays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sur', 'Cauti',null,'Outcome','Sur_data.Sur_cau_monthly_le15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numuCathDays','numPredDDays','AND loccdc ne "" AND locationtype ne ""')
+	values('Crude', 'Clabsi',null,'Outcome','Sql_data.Sql_clabsi','summaryYM','orgID',null,'LocCDC',null,'Location','CLABcount','numCLDays','AND numcldays ne . ')
+	values('Crude', 'Clabsi',null,'Process','Sql_data.Sql_clabsi','summaryYM','orgID',null,'LocCDC',null,'Location','numCLDays','numPatDays','AND numcldays ne . ')
+	values('Crude', 'Clabsi_Neo', 'birthwtcode','Outcome','Sql_data.sql_clabsi_neo','SummaryYM','orgid',null,'loccdc',null,'location','clabcount','numcldays','AND loccdc ne "" AND locationtype ne "" AND birthwtcode ne ""')
+	values('Sir', 'Clabsi',null,'Outcome','Sir_data.Sir_cla_monthly_gt15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numPred','numcldays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sir', 'Clabsi',null,'Outcome','Sir_data.Sir_cla_monthly_le15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numPred','numcldays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sur', 'Clabsi',null,'Outcome','Sur_data.Sur_cla_monthly_gt15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numCLdays','numPredDDays','AND loccdc ne "" AND locationtype ne ""')
+	values('Sur', 'Clabsi',null,'Outcome','Sur_data.Sur_cla_monthly_le15','summaryYM','orgID',null,'LocCDC',null,'LocationType','numCLdays','numPredDDays','AND loccdc ne "" AND locationtype ne ""')
+	values('Crude', 'SSI','procCode','Outcome','Sir_data.Sir_ssi_monthly','summaryYM','orgID',null,'"Entire Facility"',null,'"Entire Facility"','infcountadultcmpx','procCount','AND procCode not in ("")')
+	values('Sir', 'SSI','procCode','Outcome','Sir_data.Sir_ssi_monthly','summaryYM','orgID',null,'"Entire Facility"',null,'"Entire Facility"','infCountAdultCmpx','numpredadultcmpx','AND procCode not in ("")')
+	values('Crude', 'VAE','spcEvent','Outcome','Sql_data.sql_vae','summaryYM','orgID',null,'LocCDC',null,'Location','VaeCount','numVentDays','AND lower(compress(spcevent)) in ("vac", "ivac","pvap")')
+	values('Crude', 'VAE','spcEvent','Process','Sql_data.sql_vae','summaryYM','orgID',null,'LocCDC',null,'Location','numVentDays','numPatDays','AND lower(compress(spcevent)) in ("vac", "ivac","pvap")')
+	values('Crude', 'MRSA',null,'Outcome','Sql_data.Sql_mrsa','summaryYM','orgID',null,'"Entire Facility"',null,'"Entire Facility"','mrsa_bldinccount','numpatdays','AND location = "FACWIDEIN" AND mrsa_bldinccount ne .')
+	values('Crude', 'CDIF',null,'Outcome','Sql_data.Sql_cdiff','summaryYM','orgID',null'"Entire Facility"',null,'"Entire Facility"','cdif_facinchocount','numpatdays','AND location = "FACWIDEIN" AND cdif_facinchocount ne .');
+quit;
+
+****************************************************************
+*	CREATE MACRO VARIABLE LIST FOR EACH ROW IN TABLE ABOVE
+*	
+***************************************************************;
+Proc sql noprint;
+SELECT dataSource,
+	MeasureName, 
+	MeasureType, 
+	ProcessOutcome, 
+	TableName, 
+	Date, 
+	JarID,
+	NHSN,
+	LocCDC, 
+	UnitName, 
+	UnitType, 
+	Numerator, 
+	Denominator,
+	Conditional
+INTO :dataSource separated by '|',
+		:MeasureName separated by '|' , 
+		:MeasureType separated by '|', 
+		:ProcessOutcome separated by '|', 
+		:TableName separated by '|', 
+	 	:Date separated by '|', 
+		:JarID separated by '|',
+		:NHSN separated by '|', 
+		:LocCDC separated by '|',
+		:UnitName separated by '|', 
+		:UnitType separated by '|', 
+		:Numerator separated by '|', 
+		:Denominator separated by '|', 
+		:Conditional separated by '|'
+FROM measureParameters;
+Quit;
+
+
+*********************************************************
+*	CODE FOR MACROS BELOW
+********************************************************;
+
+*****************************************************
+*	MACRO NAME: dropData()
+*	DESCRIPTION: CLEAR EXISTING DATA FROM INPUT LIBS
+****************************************************;
+%macro dropData(pLibname);
+	proc datasets lib=&pLibname nolist kill;
+	quit;
+	run;
+%mend dropData;
+
+*****************************************************
+*	MACRO NAME: tableStaging()
+*	DESCRIPTION: CREATE STAGING FILE (AS TO NOT MODIFY ORIGINAL DATA SETS)
+****************************************************;
+%macro tableStaging(ptableName);
+	%GLOBAL newTableName;
+	%LET postion = %sysfunc(find(%scan(&ptableName, &i,%str(|),%str(M)),%STR(.)));
+	%LET fileName = %substr(%scan(&ptableName, &i,%str(|),%str(M)), &postion+1);
+
+	data staging.&&fileName;
+		set %scan(&ptableName, &i,%str(|),%str(M));
+	run;
+
+	%LET newTableName = %STR(staging.&&fileName);
+%mend tableStaging;
+
+*****************************************************
+*	MACRO NAME: modLocCDC()
+*	DESCRIPTION: MODIFY LOCCDC NAME
+****************************************************;
+%macro modLocCDC(pnewTableName, pMeasureName, pdataSource) /minoperator;
+	
+	%IF %scan(&pMeasureName, &i, %str(|), %str(M)) IN %STR(Cauti Clabsi) %THEN 
+		%DO;
+			%IF %scan(&pdataSource, &i, %str(|), %str(M)) = %STR(Crude) %THEN
+				%DO; 
+					data &pnewTableName;
+						set &pnewTableName;
+						IF LocCDC NOT IN ("IN:ACUTE:CC:NURS","IN:ACUTE:CC_STEP:NURS","IN:ACUTE:WARD:NURS");
+						IF LocCDC = "IN:ACUTE:CC:MS" THEN 
+							DO;
+								IF locbedsize = "<=15" OR LocBeds LE 15 THEN
+									IF medtype = "M" THEN LocCDC = "IN:ACUTE:CC:MS:maj";
+									ELSE LocCDC = "IN:ACUTE:CC:MS:ot1";
+								IF locbedsize = ">15" OR LocBeds GT 15 THEN 
+									IF medtype = "M" THEN LocCDC = "IN:ACUTE:CC:MS:maj";
+									ELSE LocCDC = "IN:ACUTE:CC:MS:ot2"; 
+							END;
+					run;
+				%END;
+			%IF %scan(&dataSource, &i, %str(|), %str(M)) IN (%STR(Sir) %STR(Sur)) %THEN
+				%DO;
+					%LET len = %length(&pnewTableName);
+					%IF %substr(&pnewTableName, (&len - 3), 2) = gt %THEN
+						%DO;
+							data &pnewTableName;
+								set &pnewTableName;
+								IF LocCDC NOT IN ("IN:ACUTE:CC:NURS","IN:ACUTE:CC_STEP:NURS","IN:ACUTE:WARD:NURS");
+								IF LocCDC = "IN:ACUTE:CC:MS" THEN 
+									DO;
+										IF medtype = "M" THEN LocCDC = "IN:ACUTE:CC:MS:maj";
+										ELSE LocCDC = "IN:ACUTE:CC:MS:ot2";
+									END;
+							run;
+						%END;
+					%ELSE %IF %substr(&pnewTableName, (&len - 3), 2) = le %THEN
+						%DO;
+							data &pnewTableName;
+								set &pnewTableName;
+								IF LocCDC NOT IN ("IN:ACUTE:CC:NURS","IN:ACUTE:CC_STEP:NURS","IN:ACUTE:WARD:NURS");
+								IF LocCDC = "IN:ACUTE:CC:MS" THEN 
+									DO;
+										IF medtype = "M" THEN LocCDC = "IN:ACUTE:CC:MS:maj";
+										ELSE LocCDC = "IN:ACUTE:CC:MS:ot1";
+									END;
+							run;
+						%END;
+					%ELSE 
+						%DO;
+							%PUT ERROR: FILENAME NOT WHAT WAS EXPECTED!! ARGUMENT WAS %substr(%scan(&pnewTableName, &i, %str(|), %str(M)), (&len - 3), 2). EXPECTED gt OR le;
+							%PUT WARNING: &pnewTableName;
+							%PUT ERROR: DOES %substr(&pnewTableName, (&len - 3), 2) = gt OR le?;
+						%END;
+				%END;
+		%END;
+%mend modLocCDC;
+								
+*****************************************************
+*	MACRO NAME: importSql()
+*	DESCRIPTION: SELECT STATEMENT DEPENDING ON DATA SOURCE
+****************************************************;
+%macro importSql() /minoperator;
+	
+	/**************************************************
+	*	TREAT RD DATA DIFFERENTLY, AS IT ALL COMES FROM 
+	*	ONE TABLE. ADDITIONALLY, IT DOES NOT HAVE NHSN
+	*	NUMBERS ASSOCIATED WITH IT, SO THEY ARE ADDED
+	*	FROM THE HOSPITAL LOOKUP TABLE CREATED BEFOREHAND
+	**************************************************/
+	%IF %scan(&pdataSource, &i, %str(|), %str(M)) in (%str(RD) %str(Claims)) %THEN 
+		%DO;
+			SELECT %scan(&pMeasureName, &i,%str(|),%str(M)) as MeasureName label='MeasureName',
+				Coalesce(%scan(&pMeasureType, &i, %str(|),%str(M)), "") as MeasureType label='MeasureType',
+				%scan(&pProcessOutcome, &i, %str(|),%str(M)) as ProcessOutcome label='ProcessOutcome',
+				mdy(A.month, &i, A.year) as Date label='Date' format=YYMM7., 
+				B.jarid_n as JarID label='JarID',
+				B.nhsn_n as NHSN label='NHSN',
+				'' AS LocCDC label='LocCDC', 
+				Coalesce(%scan(&pUnitType, &i, %str(|),%str(M)), "") as Unit_Type label='UnitType',
+				Coalesce(%scan(&pUnitName, &i, %str(|),%str(M)), "") as Unit_Name label='UnitName', 
+				%scan(&pNumerator, &i, %str(|),%str(M)) as Numerator label='Numerator', 
+				%scan(&pDenominator, &i, %str(|),%str(M)) as Denominator label='Denominator'
+			FROM &newTableName AS A INNER JOIN Hospital_Lookup AS B
+				ON
+					A.%scan(&pJarID, &i, %str(|), %str(M))=B.new_jarid
+			WHERE %scan(&pDenominator, &i, %str(|),%str(M)) IS NOT NULL
+				%scan(&pConditional, &i, %str(|),%str(M))
+				AND %scan(&pJarID, &i, %str(|),%str(M)) IS NOT NULL;
+			QUIT;
+		%END;
+	%ELSE
+		%DO;
+			SELECT "%scan(&pMeasureName, &i,%str(|),%str(M))" as MeasureName label='MeasureName',
+				Coalesce(%scan(&pMeasureType, &i,%str(|),%str(M)),"") as MeasureType label='MeasureType',
+				"%scan(&pProcessOutcome, &i, %str(|),%str(M))" as ProcessOutcome label='ProcessOutcome',
+				%scan(&pDate, &i, %str(|),%str(M)) as Date label='Date', 
+				B.jarid_n as JarID label='JarID',
+				B.Nhsn_n as NHSN label='NHSN', 
+				Coalesce(%scan(&pLocCDC, &i,%str(|),%str(M)), "") as LocCDC label='LocCDC',
+				'' AS Unit_Type label='UnitType',
+				Coalesce(%scan(&pUnitName, &i,%str(|),%str(M)), "") as Unit_Name label='UnitName', 
+				%scan(&pNumerator, &i,%str(|),%str(M)) as Numerator label='Numerator', 
+				%scan(&pDenominator, &i,%str(|),%str(M)) as Denominator label='Denominator'
+			FROM &newTableName AS A INNER JOIN Hospital_Lookup AS B
+				ON
+					%scan(&pNhsn, &i,%str(|),%str(M)) = B.nhsn_n
+			WHERE %scan(&pDenominator,&i, %str(|),%str(M)) IS NOT NULL
+				%scan(&pConditional, &i,%str(|),%str(M))
+				AND %scan(&pNhsn, &i,%str(|),%str(M)) NE .;
+			QUIT;
+		%END;
+%mend importSql;
+
+***********************************************
+*	MACRO NAME: dataImport()
+*	DESCRIPTION: PROCESS DATA
+**********************************************;
+%macro dataImport(pdataSource, pMeasureName, pMeasureType, pProcessOutcome, pDate, pNhsn, pJarID, 
+						pLocCDC, pUnitType, pUnitName, pNumerator, pDenominator, pTableName, pConditional);
+	********************************
+	*	INSTANTIATE LOCAL VARIABLES
+	*******************************;
+	%local count;
+	%let i=0;
+	
+	********************************
+	*	CLEAR DATA FROM LIBRARIES
+	*******************************;
+	%dropData(Crude);
+	%dropData(Sir);
+	%dropData(Sur);
+	%dropData(Rd);
+	%dropData(Claims);
+	
+	********************************
+	*	ITTERATE OVER MACRO LIST
+	*******************************;
+	%do %while (%scan(&pMeasureName, &i+1,%str(|),%str(M)) ne %str());
+		%let i = %eval(&i + 1);
+
+
+		***********************************************************
+		*	STAGE DATA FILES AND MODIFY LOCCDC (IF AVAILIBLE)
+		**********************************************************;
+
+		%tableStaging(&ptableName);	/* PASS &newTableName INTO MACROS BELOW */
+		%modLocCDC(&newTableName, &pMeasureName, &pdataSource)
+		
+		***********************************************************
+		*	IF FILE EXISTS THEN APPEND DATA, OTHERWISE CREATE TABLE
+		**********************************************************;
+		%if %sysfunc(exist(%scan(&pdataSource, &i,%str(|),%str(M)).%scan(&pMeasureName, &i, %str(|),%str(M)))) %then 
+			%do;
+				Proc sql noprint;
+				INSERT INTO %scan(&pdataSource, &i,%str(|),%str(M)).%scan(&pMeasureName, &i, %str('|'), %str(M))
+				%importSql();
+			%end;
+		%else 
+			%do;
+				Proc sql noprint;
+				CREATE TABLE %scan(&pdataSource, &i,%str(|),%str(M)).%scan(&pMeasureName, &i,%str(|),%str(M)) AS
+				%importSql();
+			%end;
+	%end;
+%mend dataImport;
+
+**************************************
+*	EXECUTE DATA IMPORT MACRO
+*************************************;
+%dataImport(pdataSource=&dataSource, pMeasureName=&MeasureName, pMeasureType=&MeasureType, pProcessOutcome=&ProcessOutcome, 
+			pDate=&Date, pNhsn=&Nhsn, pJarID=&JarID, pLocCDC=&LocCDC, pUnitType=&UnitType, pUnitName=&UnitName, pNumerator=&Numerator, pDenominator=&Denominator, 
+			pTableName=&TableName, pConditional=&Conditional);
+
+
+**************************************
+*	SET CRUDE DATA TOGETHER AND FILTER
+*************************************;
+/*
+%LET CurrentYear = 2019;
+%LET CurrentMonth = 4;
+*/
+
+PROC SQL noprint;
+SELECT catx('.', libname, MEMNAME)
+INTO: CrudeNames SEPARATED BY ' '
+FROM dictionary.tables 
+WHERE libname IN ('CRUDE','RD','CLAIMS')
+	AND MEMNAME NE 'ALL';
+quit;
+
+data crude.all;
+format MeasureName $15. MeasureType $20. ProcessOutcome $10. Date YYMM7. Year 4. Month 2. JarID 10. NHSN 5. 
+		LocCDC $40. Unit_Type Unit_Name $50. Numerator Best12. Denominator Best12.;
+set &CrudeNames;
+
+	********************************
+	*	CREATE YEAR AND MONTH COLUMNS
+	*******************************;
+	Year = year(date);
+	Month = month(date);
+
+	********************************
+	*	SUBSET TO LIMIT TO CURRENT
+	*	YEAR AND MONTH
+	*******************************;
+
+	IF (Year < &CurrentYear) or (Year = &CurrentYear and Month LE &CurrentMonth);
+
+run;
