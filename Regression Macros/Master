@@ -1,0 +1,172 @@
+
+        /*------------------------------------------------- PAYMENT_REFORM_MODELING -----
+         |  Function PAYMENT_REFORM_MODELING
+         |
+         |  Purpose:  THIS SERIES OF SAS MACROS CLEANS THE MODEL DATASET AND
+         |      CREATES/EVALUATES THE APPROPRIATE STATISTICAL MODELS TO 
+		 |		RISK-ADJUST COST/CHARGE/LOS DATA FOR EACH PHYSICIAN. THIS
+		 |		INFORMATION IS USED TO CREATE REPORTS TO EVALUATE SAID 
+		 |		PHYSICIANS.
+         |
+         |  Parameters:
+         |      data: (IN, OUT)	-----THIS IS THE DATA THAT IS USED IN THE MODELS.
+		 |		measure: (IN)----THIS IS THE SPECIFIC EPISODE MEASURE THAT THE
+		 |							STATISTICAL MODEL IS EVALUATING.
+		 |		var: (IN)--------THIS IS THE VARIABLE BEING MODELED. 
+		 |
+         |                       IN = USED TO PASS DATA INTO THIS FUNCTION,
+         |                       OUT = USED TO PASS DATA OUT OF THIS FUNCTION
+         |                       IN/OUT = USED FOR BOTH PURPOSES.
+         |
+         |  Returns: 
+		 |		VALUES: NONE. THERE ARE NO VALUES RETURNED BY THIS FUNCTION.
+         |      TABLES: 
+		 |			1) MODELRESULTS: 	THIS TABLE CONTAINS ALL OF THE RISK-ADJUSTED 
+		 |									VALUES FOR EACH MEASURE AND VARIABLE.
+		 |			2) RANDOMEFFECTS:	THIS TABLE CONTAINS ALL THE RANDOM EFFECTS 
+		 |									COEFICIENTS BY EACH MEASURE-VARIABLE COMBINATION
+		 |									BY PHYSICIAN. 
+         *----------------------------------------------------------------------------*/
+ods path(prepend) work.templat(update);
+
+***************************************************;
+* 	CLEAR ALL OF THE MACROS BEFORE STARTING PROGRAM;
+***************************************************;
+proc catalog c=work.sasmacr force kill;
+quit;
+
+/****************************************************
+*	USES THESE DIRECTORIES TO						*
+*	STORE THE RESULTS OF THE HPMIXED MODEL			*
+****************************************************/
+libname prtemp "X:\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\GLM\Macro Temp Table";
+libname random "X:\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\GLM\Random Effects";
+
+/****************************************************
+*	THESE ARE THE ESSENTIAL PROGRAMS				*
+*	REQUIRED TO RUN THE HPMIXED MODELS				*
+****************************************************/
+%include "X:\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\ImportModelData.sas";
+%include "X:\xxxxxxx\xxxxxxx\xxxxxxx\xxxxxxx\paymentreformMacrosHPMixed.sas";
+
+***********************************************************************************************;
+* 	IMPORT MODEL DATA
+***********************************************************************************************;
+
+libname sql_prfn oledb
+	bulkload=yes
+	oledb_services=no
+	insert_sql=yes
+	provider=sqloledb
+	datasource='xxxxxxx'
+	properties=(
+		"Initial Catalog"="xxxxxxx")
+	schema=dbo
+	prompt=yes;
+
+libname sql_2 oledb
+	provider=sqloledb
+	datasource='xxxxxxx'
+	properties=(
+		"Initial Catalog"="xxxxxxx")
+	schema=dbo
+	prompt=yes;
+
+libname Xdrive "X:\xxxxxxx\xxxxxxx\xxxxxxx";
+libname dnld "X:\xxxxxxx\xxxxxxx\Downloads";
+
+%importdata(year=2016, base=Modeldata)
+
+/****************************************************
+*	CREATE A DISTINCT LIST OF MEASURES				*
+*	INTO MACRO VARIABLE TO DYNAMICALLY RUN 			*
+*	A MODEL FOR EACH MEASURE THAT IS LISTED			*
+****************************************************/
+Proc Sql noprint;
+SELECT DISTINCT Episode_Name
+INTO: measureList 
+SEPARATED BY ' '
+FROM sql_prfn.EpisodeParameters
+WHERE measure_status = 1;
+quit;
+
+/****************************************************
+*	PROGRAM START									*
+****************************************************/
+
+/*	CREATE START TIME FOR PROGRAM	*/
+%let _sdtm=%sysfunc(datetime());
+
+/************************************************************************
+*	THIS SECTION OF CODE WILL CREATE VARIABLES USED IN EACH MODEL		*
+*	RESPECTIVE TO INPATIENT AND OUTPATIENT OBSERVATIONS					*
+************************************************************************/
+
+/*	CREATE INPATIENT AND OUTPATIENT FACTOR LIST FOR EACH MODEL	*/
+	%let inpatientFactors = %str(type_id sex payerlabel msdrg ageGroup los);
+	%let outpatientFactors = %str(type_id sex payerlabel pxpl ageGroup los);
+
+/*	RUN MAIN PROGRAM THAT CONTAINS THE MODELS	*/
+	%process(data=alldata);
+
+/*	EVALUATE TIME TAKEN TO RUN THE PROGRAM	*/
+	%let _edtm=%sysfunc(datetime());
+	%let _runtm=%sysfunc(putn((&_edtm - &_sdtm)/60, 12.4));
+	%put It took &_runtm minutes to run the program;
+
+/****************************************************
+*	PROGRAM TO CALCULATE MEDIAN EPISODE VALUES		*
+****************************************************/
+
+%include "X:\xxxxxxx\xxxxxxx\xxxxxxx\SAS Test Models\Medians.sas";
+
+/****************************************************
+*	PROGRAM TO FORMAT OUTPUT OF RESULTS TO 			*
+* 	SQL SERVER										*
+****************************************************/
+
+%include "X:\xxxxxxx\xxxxxxx\xxxxxxx\SAS Test Models\RptPayerTable.sas";
+
+/****************************************************
+*	PROGRAM FINISH									*
+****************************************************/
+
+Proc sql noprint;
+CREATE TABLE SqlModelResults AS
+SELECT Measure, 
+	ID,
+	ipcode, 
+	EpisodeID,
+	Seqkey, 
+	Cost,
+	Charge, 
+	CASE 
+		WHEN ipcode = '1' THEN LoS 
+		ELSE 0 
+	END as IP_LoS label='IP_LoS',
+	exp(RelAdjCost) as RelAdjCost,
+	exp(FixedCost) as FixedCost, 
+	exp(RelAdjCharge) as RelAdjCharge, 
+	exp(fixedcharge) as FixedCharge, 
+	exp(Reladjlos) as RelAdjLoS, 
+	exp(fixedLos) as FixedLos
+FROM ModelResults;
+quit; 
+
+Proc sql;
+drop table sql_prfn.modelresults;
+quit;
+
+Proc sql noprint;
+CONNECT TO oledb as sql_prfn
+(
+	provider=sqloledb
+	datasource='xxxxxxx'
+	prompt=yes
+);
+create table sql_prfn.modelresults as
+SELECT *
+FROM sqlmodelresults;
+quit;
+
+
