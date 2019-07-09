@@ -1,0 +1,258 @@
+%macro HPModel(data=, var=, ipcode=, factors=);
+	%IF &var = LOS %THEN 
+		%DO;
+			ods select FitStatistics CovParms Tests3;
+			proc hpmixed data=&data noclprint;
+				where ipcode = "&ipcode";
+			class 	physicianpk facilitypk type_id sex msdrg ageGroup payerlabel;
+					id measure ipcode id episodeid seqkey cost charge los;
+			model 	log_&var = %STR(&factors);
+			random 	int /subject = facilitypk type=chol;
+			random 	int /subject = physicianpk(facilitypk) type=chol;
+			test 	&factors /htype=3;
+			nloptions
+					tech=dbldog
+					gconv=1e-6 fconv=1e-16
+					maxiter=100000 maxfunc=100000;
+			output out=prtemp.&measure.&var.&ipcode.
+					predicted=RelAdj&var predicted(noblup)=Fixed&var residual=Residual&var;
+			title "'&measure' '&var' Model Output";
+				run;
+			quit;
+			ods listing close;
+		%END;
+	%ELSE
+		%DO;
+			ods select FitStatistics CovParms Tests3;
+			proc hpmixed data=&data noclprint;
+				where ipcode = "&ipcode";
+			class 	physicianpk facilitypk type_id sex msdrg pxpl ageGroup payerlabel shortpatzip los;
+					id measure ipcode id episodeid seqkey cost charge los;
+			model 	log_&var = %STR(&factors);
+			random 	int /subject = facilitypk type=chol;
+			random 	int /subject = physicianpk(facilitypk) type=chol;
+			test 	&factors /htype=3;
+			nloptions
+					tech=dbldog
+					gconv=1e-6 fconv=1e-16
+					maxiter=100000 maxfunc=100000;
+			output out=prtemp.&measure.&var.&ipcode.
+					predicted=RelAdj&var predicted(noblup)=Fixed&var residual=Residual&var;
+			title "'&measure' '&var' Model Output";
+				run;
+			quit;
+			ods listing close;
+		%END;
+%mend HPModel;
+
+%macro runModel(data=, measure=, var=);
+
+%IF &var=LOS %THEN 
+	%DO;
+		%LET modelFactors = type_id sex payerlabel msdrg ageGroup type_id*msdrg;
+		%HPModel(data=prtemp.modeldata, var=&var, ipcode=1, factors=&modelFactors);
+	%END;
+%ELSE 
+	%DO;
+		%LET ipcode = 0;
+		%DO %WHILE (&ipcode < 2);
+			%IF &ipcode = 0 %THEN
+				%DO; 
+					%LET modelFactors = &outpatientFactors;
+				%END;
+			%ELSE %IF &ipcode = 1 %THEN 
+				%DO;
+					%LET modelFactors = &inpatientFactors;
+				%END;
+			%ELSE %PUT ERROR: INVALAD IPCODE SELECTION;
+			%HPModel(data=prtemp.modeldata, var=&var, ipcode=&ipcode, factors=&modelFactors);
+			%LET ipcode = %EVAL(&ipcode + 1);
+		%END;
+	%END;
+
+%MEND runModel;
+
+*****************;
+*PREDICTED OUTPUT;
+*****************;
+%MACRO innerCollection(measure=, var=);
+%IF &i = 1 %THEN 
+	%DO;
+		Data prtemp.&var;
+			keep 	Measure ID EpisodeID Seqkey IPcode
+					Cost Charge LoS RelAdj&var Fixed&var Residual&var;
+			set prtemp.&measure.&var:;
+			label 	RelAdj&var = "RelAdj&var"
+					Fixed&var = "Fixed&var"
+					Residual&var = "Residual&var";
+		Run;
+		/*
+		Proc SQL noprint;
+		CREATE TABLE prtemp.&var AS
+		SELECT Measure, 
+			ID, 
+			EpisodeID, 
+			Seqkey,
+			IPcode,
+			Cost, 
+			Charge, 
+			LoS, 
+			RelAdj&var label="RelAdj&var",
+			Fixed&var label="Fixed&var",
+			Residual&var label="Residual&var"
+		FROM prtemp.&measure.&var.0
+		UNION ALL CORR
+		SELECT Measure, 
+			ID, 
+			EpisodeID, 
+			Seqkey,
+			IPcode,
+			Cost, 
+			Charge, 
+			LoS, 
+			RelAdj&var label="RelAdj&var",
+			Fixed&var label="Fixed&var",
+			Residual&var label="Residual&var"
+		FROM prtemp.&measure.&var.1;
+		QUIT;
+		*/
+		proc datasets lib=prtemp nolist;
+			delete &measure.&var.:;
+		run;
+		
+	%END; 
+%ELSE
+	%DO;
+		data prtemp.&var;
+			set prtemp.&var prtemp.&measure.&var:;
+		run; 
+			
+		proc datasets lib=prtemp nolist;
+			delete &measure.&var.:;
+		run;
+		quit;
+	%END;
+%MEND innerCollection;
+%MACRO outerCollection(measure=, var=);
+%IF &j=1 %THEN
+	%DO;
+		data modelResults;
+			set prtemp.&var;
+		run;
+
+		Proc datasets lib=prtemp nolist;
+			delete &var;
+		run;
+		QUIT;
+	%END;
+%ELSE 
+	%DO;
+		Proc SQL noprint;
+		CREATE TABLE prtemp.modelResultsPre AS 
+		SELECT A.*,
+			B.RelAdj&var, 
+			B.Fixed&var,
+			B.Residual&var
+		FROM modelResults AS A LEFT JOIN prtemp.&var AS B
+			ON
+				A.id = B.id;
+		QUIT;
+		
+		data modelResults;
+			set prtemp.modelResultsPre;
+		run;
+
+		Proc datasets lib=prtemp nolist;
+			delete &var modelResultsPre;
+		run;
+		QUIT;
+	%END;  
+
+%MEND outerCollection;
+
+%macro cleanup;
+proc datasets lib=prtemp nolist;
+	delete modeldata losdata parms;
+run;
+quit;
+proc datasets lib=random nolist;
+	delete randomeffectspre;
+run;
+quit;
+%mend cleanup;
+
+%macro timetaken;
+	
+	%IF %EVAL(&i * &j) = 1 %THEN
+		%DO;
+			%let _pdtm = %sysfunc(datetime());
+			%let _progtime = %sysfunc(putn((&_pdtm - &_sdtm)/60, 12.4));
+			data programTime;
+				Measure = &measureName;
+				Variable = &varName;
+				runTime = &_progTime;
+			run;
+		%END;
+	%ELSE 
+		%DO;
+			%let _pdtm = %sysfunc(datetime());
+			%let _progtime = %sysfunc(putn((&_pdtm - &_sdtm)/60, 12.4));
+			data programTime;
+				set programtime;
+				Measure = &measureName;
+				Variable = &varName;
+				runTime = &_progTime;
+			run;
+		%END;
+	%put It took &_progtime to run the &measureName &varName program;  
+%mend timetaken;
+
+%macro subsetData(data=,measure=, var=);
+%IF &var=LOS %THEN
+	%DO;
+		Proc SQL noprint;
+		create table prtemp.modeldata as
+		SELECT *
+		FROM &data
+		WHERE ipcode = '1'
+			AND measure = "&measure"
+		ORDER BY ipcode, facility, physician;
+		QUIT;
+	%END;
+%ELSE 
+	%DO;
+		Proc SQL noprint;
+		create table prtemp.modeldata as
+		SELECT *
+		FROM &data
+		WHERE measure = "&measure"
+		ORDER BY ipcode, facility, physician;
+		QUIT;
+	%END;
+%mend subsetData;
+
+%macro process(data=);
+
+%local i measureName;
+%local j varName;
+
+%let j=1;
+%let varList = Cost Charge LOS;
+
+%do %while (%scan(&varList, &j) ne );
+	%let varName = %scan(&varList, &j);
+	%let i=1;
+   	%do %while (%scan(&measureList, &i) ne );
+   		%let measureName = %scan(&measureList, &i);
+		%subsetData(data=&data, measure=&measureName, var=&varName);
+		%runModel(data=prtemp.modeldata, measure=&measureName, var=&varName);
+		%innerCollection(measure=&measureName, var=&varName);
+		%timeTaken;
+		%cleanup;
+		%let i = %eval(&i + 1);
+	%end;
+	%outerCollection(measure=&measureName, var=&varname);
+	%let j = %eval(&j + 1);
+%end;
+
+%mend process;
