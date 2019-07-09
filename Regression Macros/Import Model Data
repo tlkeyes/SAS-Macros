@@ -1,0 +1,331 @@
+
+****************************************************;
+* MACRO FOR IMPORTING DATA							;
+* # This macro will import the data based on data	;
+* # imported later on in the program				;
+****************************************************;
+%macro importdata(year=, base=);
+
+%BaseData(data=&base);
+
+%DataImport(data=&base);
+
+Proc sql noprint;
+CREATE VIEW uniquecodespre as 
+SELECT DISTINCT 
+	ipcode, 
+	ascode, 
+	ercode, 
+	obscode, 
+	dscode
+FROM Modeldataunpre
+WHERE Year = &year;
+CREATE TABLE uniquecodes as 
+SELECT monotonic() as Type_ID, 
+	*
+FROM uniquecodespre;
+
+CREATE TABLE AllData as
+SELECT A.id,
+	A.Episodeid,
+	A.Seqkey,
+	A.TimeReference, 
+	A.episodename as Measure label='Measure',	
+	A.Physician,
+	A.PhysicianPk,
+	A.Facility,
+	A.FacilityPk,
+	A.Triggerclaim_Facility, 
+	A.Triggerclaim_Quarterback,
+	A.PatZip,
+	substr(A.patzip,1,3) as ShortPatZip label='ShortPatZip',
+	A.DateDifference, 
+	A.age,
+	A.AgeGroup format $12.,
+	A.log_age,
+	A.Sex,
+	A.Race, 
+	A.ppayercode,
+	A.payerlabel,
+	A.ipcode, 
+	A.ascode, 
+	A.ercode, 
+	A.obscode, 
+	A.dscode,
+	B.type_id, 
+	A.Msdrg,
+	A.Aprdrg,
+	A.DxPl,
+	A.PxPl,
+	A.rom, 
+	A.soi,
+	A.charge,
+	A.log_charge,
+	A.cost,
+	A.log_cost,
+	A.los,
+	A.log_los
+FROM modeldataunpre as A LEFT JOIN Uniquecodes as B
+	ON
+		A.ipcode = B.ipcode
+		and A.ascode = B.ascode 
+		and A.ercode = B.ercode
+		and A.obscode = B.obscode
+		and A.dscode = B.dscode
+	INNER JOIN sql_prfn.EpisodeParameters AS P
+	ON
+		A.episodename = P.Episode_Name
+WHERE year = &year
+	and P.Measure_Status = 1
+	and (A.DateDifference between -P.pretrigger_days and (P.posttrigger_days1 + P.posttrigger_days2))
+	and A.age between P.age_min and P.age_max
+	and A.sex in ('F','M')
+ORDER BY Measure, ipcode, facility, physician, ageGroup, type_id, msdrg, los;
+create unique index ID
+           on alldata(id);
+quit;
+
+%pctlAdjustments(data=alldata);
+
+%mend importdata;
+
+************************************************;
+* 95% OF DATA									;
+************************************************;
+%macro pctlAdjustments(data=);
+	Proc Univariate data=&data noprint;
+		by measure ipcode;
+		var cost charge los;
+	output out=pctlptsData pctlpts=2.5 97.5 pctlpre=Cost_ Charge_ LoS_;
+	run;
+
+	Proc sql noprint;
+	create table AdjustedData as 
+	SELECT A.*, 
+		B.cost_2_5 as Cost_2_5 label='Cost_2_5',
+		B.charge_2_5 as Charge_2_5 label='Charge_2_5',
+		B.los_2_5 as Los_2_5 label='Los_2_5',
+		B.cost_97_5 as Cost_97_5 label='Cost_97_5',
+		B.charge_97_5 as Charge_97_5 label='Charge_97_5',
+		B.los_97_5 as Los_97_5 label='Los_97_5'
+	FROM AllData as A INNER JOIN pctlptsData AS B
+		On
+			A.measure = B.measure 
+			and A.ipcode = B.ipcode;
+	Quit;
+
+	%local j varName;
+	%let varList = Cost Charge LOS;
+	%let j= 1;
+
+	Data alldata;
+		set AdjustedData;
+		%do %while (%scan(&varlist, &j) ne );
+			%let varname = %scan(&varlist, &j);
+			if &varname._2_5 <= &varname <= &varname._97_5 then 
+				do;
+				end;
+			else if &varname > &varname._97_5 then 
+				do;
+					&varname = &varname._97_5;
+					log_&varname = log1px(&varname._97_5);
+				end;
+			else if &varname < &varname._2_5 then 
+				do;
+					&varname = &varname._2_5;
+					log_&varname = log1px(&varname._2_5);
+				end;
+			%let j = %eval(&j + 1);
+		%end;
+		drop cost_2_5 charge_2_5 los_2_5 cost_97_5 charge_97_5 los_97_5;
+	run;			
+%mend pctlAdjustments;
+
+
+************************************************;
+* BASE DATA										;
+************************************************;
+%macro BaseData(data=);
+	/*Proc sql noprint;
+	create table ModelData_Pre1 as 
+	SELECT DISTINCT
+		A.Episodename as Measure label='Measure',
+		A.Triggerclaim_facility,
+		A.Triggerclaim_Quarterback format $50.,
+		A.jarid,
+		A.Phys1b
+	FROM sql_prfn.&data as A
+	WHERE A.episodestatus is null
+		and A.jarid is not null
+	ORDER BY A.Triggerclaim_Facility, A.phys1b;
+	QUIT;
+	*/
+	proc sql noprint;
+	create table PrimaryKeyPre as 
+	select distinct measure, 
+		jarid as Facility label='Facility', 
+		phys1b
+	from sql_prfn.&data
+	where episodestatus is null
+		and jarid is not null;
+	quit;
+
+	proc sort data=PrimaryKeyPre;
+		by measure facility phys1b;
+	run;
+
+	%PrimaryKeys();
+%mend BaseData;
+/*******************************************************
+* 	CREATE PK TABLES
+*******************************************************/
+
+%macro PrimaryKeys();
+/**************************
+*	ALL KEYS
+**************************/
+data PrimaryKeyList;
+	set PrimaryKeyPre;
+	by measure facility phys1b;
+		if first.measure then 
+			do;
+				FacilityPk = 0;
+				PhysicianPk = 0;
+			end;
+		if first.facility then 
+			do;
+				FacilityPk+1;
+				PhysicianPk = 0;
+			end;
+		if first.phys1b then PhysicianPk+1;
+run;
+%mend PrimaryKeys;
+************************************************
+* UNAGGREGATED DATA
+************************************************;
+%macro DataImport(data=); 
+Proc sql noprint;
+create table ModelDataImport as 
+SELECT A.ID, 
+	A.Episodeid,
+	A.Seqkey, 
+	A.Episodename,
+	A.Year,
+	A.jarid as Facility label='Facility',
+	PK.FacilityPk, 
+	A.triggerclaim_facility as Triggerclaim_Facility label='Triggerclaim_Facility',
+	A.triggerclaim_quarterback as Triggerclaim_Quarterback label='Triggerclaim_Quarterback',
+	PK.PhysicianPk,
+	A.phys1b as Physician label='Physician',
+	A.DateDifference,
+	CASE 
+		WHEN A.DateDifference in(0,1) THEN 'T'
+		WHEN A.DateDifference < 0 THEN 'PreObs'
+		WHEN A.DateDifference > 1 THEN 'PostObs'
+		ELSE ''
+	END AS TimeReference,
+	A.Msdrg,
+	A.Aprdrg,
+	A.DxPl,
+	A.PxPl,
+	A.PatZip,
+	A.Sex,
+	A.Age,
+	A.Race,
+	A.ip_los,
+	A.los,
+	A.TriggerClaim_Payer,
+	A.PpayerCode,
+	P.label as Payerlabel label='PayerLabel',
+	A.Rom,
+	A.Soi,
+	A.IPcode, 
+	A.AScode, 
+	A.ERcode, 
+	A.OBScode,
+	A.DScode,
+	A.readmit,
+	A.charge as Charge label = 'Charge' ,
+	A.cost as Cost label = 'Cost'
+FROM sql_prfn.&data as A LEFT JOIN PrimaryKeyList as PK
+	ON
+		A.Measure = PK.Measure
+		and A.jarid = PK.facility
+		and A.phys1b = PK.phys1b
+	INNER JOIN sql_2.Payergroup as P
+	ON
+		A.ppayercode = P.Payercode
+WHERE A.episodestatus is null
+	and A.jarid is not null;
+QUIT;
+
+************************************************
+* FILL IN NULLS DATA
+************************************************; 
+
+data modelDataUnPre;
+set modeldataimport;
+format ipcodenum 1. quarterbackStr $25. log_charge 18.15 ageGroup $12.;
+if race = '' then race = '0';
+if quarterback = . then quarterback = 0;
+if msdrg = '' then msdrg = '0';
+if aprdrg = '' then aprdrg = '0';
+if rom = '' then rom = '0';
+if soi = '' then soi = '0';
+if ercode = '' then ercode = '0';
+if ipcode = '' then ipcode = '0';
+if obscode = '' then obscode = '0';
+if dscode = '' then dscode = '0';
+if ascode = '' then ascode = '0';
+if readmit = '' then readmit = '0';
+log_iplos = log1px(ip_los);
+log_age = log1px(age);
+log_los = log1px(los); 
+log_charge = log1px(charge); 
+log_cost = log1px(cost);
+quarterbackStr = quarterback;
+if age > 0 then 
+	do;
+		if age < 16 then ageGroup = '< 16';
+		if 15 < age <= 25 then ageGroup = '16 to 25';
+		if 25 < age <= 35 then ageGroup = '26 to 35';
+		if 35 < age <= 45 then ageGroup = '36 to 45';
+		if 45 < age <= 55 then ageGroup = '46 to 55';
+		if 55 < age <= 65 then ageGroup = '56 to 65';
+		if 65 < age <= 75 then ageGroup = '66 to 75';
+		if 75 < age <= 85 then ageGroup = '76 to 85';
+		if 85 < age <= 95 then ageGroup = '86 to 95';
+		if age > 95 then ageGroup = '> 95';
+	end;
+else ageGroup = '< 1';
+run;
+
+%mend DataImport;
+
+************************************************
+* SUBSET MODEL DATA MACRO
+************************************************; 
+
+%macro subsetData(data=,measure=, var=);
+%IF &var=LOS %THEN
+	%DO;
+		Proc SQL noprint;
+		create table prtemp.modeldata as
+		SELECT *
+		FROM &data
+		WHERE ipcode = '1'
+			AND measure = "&measure"
+		ORDER BY ipcode;
+		QUIT;
+	%END;
+%ELSE 
+	%DO;
+		Proc SQL noprint;
+		create table prtemp.modeldata as
+		SELECT *
+		FROM &data
+		WHERE measure = "&measure"
+		ORDER BY ipcode;
+		QUIT;
+	%END;
+%mend subsetData;
